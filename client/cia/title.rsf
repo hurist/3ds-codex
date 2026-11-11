@@ -2,6 +2,7 @@ BasicInfo:
   Title: 3DSCodex
   ProductCode: CTR-P-XCDX
   CompanyCode: "00"
+  Logo: Homebrew
 
 TitleInfo:
   Category: Application
