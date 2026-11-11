@@ -1,0 +1,14 @@
+[Unit]
+Description=3DS Codex host relay
+
+[Service]
+EnvironmentFile=%h/.local/state/3ds-codex/host.env
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=%h
+ExecStart=/usr/bin/python3 ${THREEDS_CODEX_PROJECT}/bridge/host_relay.py %h/.local/state/3ds-codex/run/codex.sock
+Restart=on-failure
+RestartSec=2
+UMask=0077
+
+[Install]
+WantedBy=default.target

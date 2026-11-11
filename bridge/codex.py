@@ -11,6 +11,7 @@ from threading import Condition, Lock, Thread
 from time import monotonic
 
 from images import Attachment, MARKDOWN_IMAGE, ImagePreviews
+from host_relay import HostSession, desktop_state, relay_read
 
 
 class CodexError(Exception):
@@ -158,7 +159,8 @@ def parse_answers(questions, raw):
 
 
 class AppServer:
-    def __init__(self):
+    def __init__(self, host_socket=None):
+        self.host_socket = host_socket
         self.process = None
         self.replies = None
         self.sequence = 0
@@ -170,15 +172,17 @@ class AppServer:
         self.decisions = {}
         self.file_changes = {}
 
-    def read_replies(self, stdout, replies):
+    def read_replies(self, process, replies):
         try:
-            for line in stdout:
+            for line in process.stdout:
                 message = json.loads(line)
                 if "id" in message and "method" not in message:
                     replies.put(message)
                 elif "method" in message:
                     self.record_event(message)
         finally:
+            if isinstance(process, HostSession):
+                process.finished.set()
             replies.put(None)
 
     def record_event(self, message):
@@ -315,8 +319,9 @@ class AppServer:
 
     def request(self, method, params):
         try:
-            if self.process is None:
-                self.process = subprocess.Popen(
+            if self.process is None or self.process.poll() is not None:
+                self.close()
+                self.process = HostSession(self.host_socket) if self.host_socket else subprocess.Popen(
                     ["codex", "app-server", "--listen", "stdio://"],
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
@@ -332,7 +337,7 @@ class AppServer:
                     self.input_receipts.clear()
                     self.decisions.clear()
                     self.file_changes.clear()
-                Thread(target=self.read_replies, args=(self.process.stdout, self.replies), daemon=True).start()
+                Thread(target=self.read_replies, args=(self.process, self.replies), daemon=True).start()
                 self.exchange("initialize", {"clientInfo": {"name": "3ds-codex", "version": "0.2"}})
                 self.send({"method": "initialized"})
             return self.exchange(method, params)
@@ -355,6 +360,9 @@ class AppServer:
         self.process = None
         if process is None:
             return
+        if isinstance(process, HostSession):
+            process.close()
+            return
         if process.poll() is None:
             process.terminate()
             try:
@@ -366,11 +374,9 @@ class AppServer:
         process.stdout.close()
 
 
-def desktop_projects(codex_home):
+def desktop_projects(codex_home, host_socket=None):
     try:
-        state = json.loads((codex_home / ".codex-global-state.json").read_text())
-    except FileNotFoundError:
-        return {}, {}, set()
+        state = json.loads(relay_read(host_socket, b"S", 16 * 1024 * 1024)) if host_socket else desktop_state(codex_home)
     except (OSError, ValueError) as error:
         raise CodexError("无法读取 Codex 桌面项目，请刷新重试。") from error
 
@@ -429,8 +435,9 @@ def conversation_messages(turns):
 class Library:
     def __init__(self):
         self.codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
-        self.app = AppServer()
-        self.image_previews = ImagePreviews()
+        self.host_socket = os.environ.get("THREEDS_CODEX_HOST_SOCKET")
+        self.app = AppServer(self.host_socket)
+        self.image_previews = ImagePreviews(self.host_socket)
         self.lock = Lock()
         self.projects = {}
         self.threads = {}
@@ -444,7 +451,7 @@ class Library:
     def refresh(self, force=False):
         if not force and self.loaded_at is not None and monotonic() - self.loaded_at < 20:
             return
-        projects, assignments, projectless = desktop_projects(self.codex_home)
+        projects, assignments, projectless = desktop_projects(self.codex_home, self.host_socket)
         threads = {}
         cursor = None
         while True:

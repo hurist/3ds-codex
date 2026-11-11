@@ -70,6 +70,44 @@ python3 bridge/server.py --revoke 设备编号
 
 局域网模式只绑定指定 IPv4 地址，使用预共享密钥建立 TLS 连接。设备凭据保存在 SD 卡的 `/3ds/3ds-codex.pair`。电脑端默认保存到 `~/.config/3ds-codex/devices.json`，可用 `--devices-file` 指定其他位置。保持凭据文件私有。原本的同机模拟模式继续使用回环地址和端口 `8765`。
 
+## Docker 部署与开机启动
+
+在 Linux 上使用 Docker Compose。桥接容器负责加密局域网连接、图片预览和语音转写。主机上的用户服务通过本地 Unix 套接字启动 Codex，继续使用桌面端所在账号和原来的项目路径。Codex 的登录文件和项目目录不需要挂进容器。
+
+1. 用运行 Codex 的账号创建 `~/.local/state/3ds-codex`，在里面建立 `run`、`devices` 和 `voice` 三个目录，权限设为仅当前用户访问。已有配对可将原来的 `devices.json` 放进 `devices/`。本地 Whisper 模型可放到 `voice/model.bin`。
+2. 写入 `~/.local/state/3ds-codex/host.env`，将路径替换为当前仓库的绝对路径。
+
+   ```dotenv
+   THREEDS_CODEX_PROJECT="/你的项目路径/3DS Codex"
+   ```
+
+3. 写入同一目录的 `compose.env`，将示例值换成当前账号的 UID、GID、状态目录和电脑局域网地址。
+
+   ```dotenv
+   THREEDS_CODEX_STATE=/home/你的用户名/.local/state/3ds-codex
+   THREEDS_CODEX_UID=1000
+   THREEDS_CODEX_GID=1000
+   THREEDS_CODEX_IP=192.168.50.50
+   THREEDS_CODEX_PORT=18767
+   ```
+
+4. 从项目目录安装用户服务并启动容器。
+
+   ```sh
+   install -D -m 644 deploy/3ds-codex-host.service ~/.config/systemd/user/3ds-codex-host.service
+   systemctl --user daemon-reload
+   systemctl --user enable --now 3ds-codex-host.service
+   loginctl enable-linger "$USER"
+   docker compose --env-file ~/.local/state/3ds-codex/compose.env up -d --build
+   ```
+
+Docker 服务需已启用开机启动。容器使用 `unless-stopped` 重启策略，并在局域网地址尚未就绪时等待。保留原地址、端口和配对文件即可重连。首次配对可发送信号打开十分钟配对窗口：
+
+```sh
+docker compose --env-file ~/.local/state/3ds-codex/compose.env kill -s SIGUSR1 bridge
+docker compose --env-file ~/.local/state/3ds-codex/compose.env logs --tail 10 bridge
+```
+
 ## 查看对话图片
 
 安装电脑桥接所用 Python 环境的 Pillow 后，图片附件会在对话里显示缩略图。点下屏「查看图片」，或按住 ZL 把对话移到触屏后点图片。打开后可放大、缩小，在下屏拖动，或用 L/R 查看当前历史页的其他图片。

@@ -7,12 +7,15 @@ from dataclasses import dataclass
 from hashlib import sha256
 from io import BytesIO
 import os
+import json
 from pathlib import Path
 import re
 from secrets import token_hex
 import stat
 import struct
 import zlib
+
+from host_relay import relay_read
 
 try:
     from PIL import Image, ImageOps
@@ -48,7 +51,8 @@ def resize(image, bounds):
 
 
 class ImagePreviews:
-    def __init__(self):
+    def __init__(self, host_socket=None):
+        self.host_socket = host_socket
         self.entries = OrderedDict()
         self.sources = {}
 
@@ -89,7 +93,12 @@ class ImagePreviews:
         if Image is None:
             return None
         try:
-            source = self.open_source(attachment, project, codex_home)
+            if self.host_socket and not attachment.embedded and not DATA_IMAGE.match(attachment.value or ""):
+                request = json.dumps({"path": attachment.value, "project": str(project) if project else None})
+                payload = relay_read(self.host_socket, b"I" + request.encode() + b"\n", MAX_SOURCE)
+                source = BytesIO(payload) if payload else None
+            else:
+                source = self.open_source(attachment, project, codex_home)
             if source is None:
                 return None
             key = (thread, sha256(source.getbuffer()).digest())

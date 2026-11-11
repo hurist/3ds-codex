@@ -1,11 +1,14 @@
 """Serve the local Codex client to the 3DS client."""
 
 import argparse
+import errno
 from datetime import datetime
 from ipaddress import IPv4Address
 import os
 from pathlib import Path
 import ssl
+import signal
+from time import sleep
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import re
 from secrets import compare_digest, token_hex
@@ -379,6 +382,7 @@ def main():
     parser.add_argument("--port", type=int, help="默认端口为本机 8765、局域网 8766")
     parser.add_argument("--lan-address", help="监听指定的局域网 IPv4 地址并启用加密")
     parser.add_argument("--pair", action="store_true", help="生成一次性配对码")
+    parser.add_argument("--wait-for-address", action="store_true", help="启动时等待局域网地址可用")
     parser.add_argument("--devices-file", default=Path(os.environ.get(
         "XDG_CONFIG_HOME", Path.home() / ".config")) / "3ds-codex" / "devices.json")
     management = parser.add_mutually_exclusive_group()
@@ -412,8 +416,15 @@ def main():
             parser.error("请输入电脑的局域网 IPv4 地址。")
         if not getattr(ssl, "HAS_PSK", False):
             parser.error("加密局域网模式需要支持 PSK 的 Python 3.13 或更新版本。")
-        server_instance = LanServer((str(address), 8766 if args.port is None else args.port),
-                                    Handler, store, args.pair)
+        port = 8766 if args.port is None else args.port
+        while True:
+            try:
+                server_instance = LanServer((str(address), port), Handler, store, args.pair)
+                break
+            except OSError as error:
+                if not args.wait_for_address or error.errno != errno.EADDRNOTAVAIL:
+                    raise
+                sleep(3)
     else:
         server_instance = ThreadingHTTPServer(("127.0.0.1", 8765 if args.port is None else args.port), Handler)
     library = Library()
@@ -424,6 +435,11 @@ def main():
         host, port = server.server_address
         if isinstance(server, LanServer):
             print(f"3DS Codex 加密局域网连接：{host}:{port}", flush=True)
+            def enable_pairing(*_):
+                print(f"一次性配对码（10 分钟有效）：{server.open_pairing()}", flush=True)
+
+            if hasattr(signal, "SIGUSR1"):
+                signal.signal(signal.SIGUSR1, enable_pairing)
             if server.code:
                 print(f"一次性配对码（10 分钟有效）：{server.code}", flush=True)
         else:

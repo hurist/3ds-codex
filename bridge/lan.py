@@ -79,9 +79,11 @@ class DeviceStore:
 class LanServer(ThreadingHTTPServer):
     def __init__(self, address, handler, store, pairing):
         self.devices = store
-        self.code = base64.b32encode(token_bytes(13)).decode()[:20] if pairing else None
-        self.pair_until = monotonic() + PAIR_SECONDS
+        self.code = None
+        self.pair_until = 0
         self.pair_lock = Lock()
+        if pairing:
+            self.open_pairing()
         self.connection = local()
         self.context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self.context.minimum_version = self.context.maximum_version = ssl.TLSVersion.TLSv1_2
@@ -89,6 +91,12 @@ class LanServer(ThreadingHTTPServer):
         self.context.options |= ssl.OP_NO_TICKET
         self.context.set_psk_server_callback(self.psk)
         super().__init__(address, handler)
+
+    def open_pairing(self):
+        with self.pair_lock:
+            self.code = base64.b32encode(token_bytes(13)).decode()[:20]
+            self.pair_until = monotonic() + PAIR_SECONDS
+            return self.code
 
     def psk(self, identity):
         if identity == "pair":

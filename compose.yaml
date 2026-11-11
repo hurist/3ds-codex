@@ -1,0 +1,53 @@
+name: 3ds-codex
+services:
+  bridge:
+    build: .
+    image: 3ds-codex-bridge:local
+    restart: unless-stopped
+    stop_signal: SIGINT
+    network_mode: host
+    user: "${THREEDS_CODEX_UID:?set THREEDS_CODEX_UID}:${THREEDS_CODEX_GID:?set THREEDS_CODEX_GID}"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:mode=1777
+    environment:
+      THREEDS_CODEX_HOST_SOCKET: /relay/codex.sock
+      THREEDS_CODEX_IP: "${THREEDS_CODEX_IP:?set THREEDS_CODEX_IP}"
+      THREEDS_CODEX_PORT: "${THREEDS_CODEX_PORT:-18767}"
+    volumes:
+      - type: bind
+        source: "${THREEDS_CODEX_STATE:?set THREEDS_CODEX_STATE}/run"
+        target: /relay
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${THREEDS_CODEX_STATE}/devices"
+        target: /devices
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${THREEDS_CODEX_STATE}/voice"
+        target: /voice
+        read_only: true
+        bind:
+          create_host_path: false
+    command:
+      - --lan-address
+      - "${THREEDS_CODEX_IP}"
+      - --port
+      - "${THREEDS_CODEX_PORT:-18767}"
+      - --wait-for-address
+      - --devices-file
+      - /devices/devices.json
+      - --whisper-model
+      - /voice/model.bin
+    healthcheck:
+      test: [CMD, python3, -c, "import os,socket; s=socket.create_connection((os.environ['THREEDS_CODEX_IP'], int(os.environ['THREEDS_CODEX_PORT'])),2); s.close(); r=socket.socket(socket.AF_UNIX); r.settimeout(2); r.connect(os.environ['THREEDS_CODEX_HOST_SOCKET']); r.sendall(b'S'); assert r.recv(1) == b'{'; r.close()"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
