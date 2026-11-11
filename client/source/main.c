@@ -498,8 +498,6 @@ static void render(Screen top, Screen bottom, View view, bool loaded, bool loadi
                   view.kind == CONVERSATIONS ? "B 返回项目  ·  按住 ZL 换屏" :
                   "B 返回  ·  按住 ZL 滑动", UI_MUTED);
     }
-    gfxFlushBuffers();
-    gfxSwapBuffers();
 }
 
 static u32 touch_action(View view, touchPosition touch, bool retry_action, bool *copy_message)
@@ -644,8 +642,8 @@ static void on_applet_event(APT_HookType event, void *context)
 int main(void)
 {
     gfxInitDefault();
-    Screen top = screen_init(GFX_TOP);
-    Screen bottom = screen_init(GFX_BOTTOM);
+    gfxSetDoubleBuffering(GFX_TOP, true);
+    gfxSetDoubleBuffering(GFX_BOTTOM, true);
     void *buffer = memalign(0x1000, SOC_BUFFER_SIZE);
     bool network_ready = buffer && R_SUCCEEDED(socInit(buffer, SOC_BUFFER_SIZE));
     char error[128] = "";
@@ -1172,41 +1170,34 @@ int main(void)
             }
             redraw = true;
         }
-        if (voice.phase == VOICE_RECORDING && osGetTime() - last_voice_draw >= 250) {
+        if (voice.phase == VOICE_RECORDING && osGetTime() - last_voice_draw >= 120) {
             last_voice_draw = osGetTime();
+            voice_update_level(&voice);
             redraw = true;
         }
         if (redraw) {
+            Screen top = screen_back_buffer(GFX_TOP);
+            Screen bottom = screen_back_buffer(GFX_BOTTOM);
             if (setup.phase != SETUP_CLOSED) {
                 setup_draw(top, bottom, &setup, held);
-                gfxFlushBuffers();
-                gfxSwapBuffers();
             } else if (voice.phase != VOICE_CLOSED) {
                 voice_draw(&voice, top, bottom, form_open ? "语音回答" : heading);
-                gfxFlushBuffers();
-                gfxSwapBuffers();
             } else if (selection.cursor) {
                 SelectionPage page = selection_page();
                 selection_draw(top, bottom, heading, &selection, &page);
-                gfxFlushBuffers();
-                gfxSwapBuffers();
             } else if (composing) {
                 composer_draw(editor, top, bottom, form_open ? "回答 Codex" : heading,
                               *compose_turn != 0, *clipboard != 0, form_open, held);
-                gfxFlushBuffers();
-                gfxSwapBuffers();
             } else if (pictures.open) {
                 pictures_draw(&pictures, top, bottom);
-                gfxFlushBuffers();
-                gfxSwapBuffers();
             } else if (form_open) {
                 form_draw(&form, top, bottom, worker != NULL, error, retry == ANSWER_INPUT);
-                gfxFlushBuffers();
-                gfxSwapBuffers();
             } else {
                 render(top, bottom, views[current], loaded, worker != NULL, retry != READ_VIEW, error, &endpoint, setup.notice,
                        swapped && !confirm_stop && !decision && !*error);
             }
+            gfxFlushBuffers();
+            gfxSwapBuffers();
             redraw = false;
         }
         gspWaitForVBlank();

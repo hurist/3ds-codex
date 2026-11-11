@@ -24,14 +24,15 @@ void voice_start(Voice *voice)
         return;
     }
     memset(voice->samples, 0, MIC_BUFFER_SIZE);
+    GSPGPU_FlushDataCache(voice->samples, MIC_BUFFER_SIZE);
     if (R_FAILED(micInit(voice->samples, MIC_BUFFER_SIZE))) {
         voice_close(voice);
         fail(voice, "无法访问麦克风。");
         return;
     }
-    if (R_FAILED(MICU_SetAllowShellClosed(false)) ||
-        R_FAILED(MICU_StartSampling(MICU_ENCODING_PCM16_SIGNED, MICU_SAMPLE_RATE_16360,
-                                    0, MAX_AUDIO_BYTES, false))) {
+    MICU_SetAllowShellClosed(false);
+    if (R_FAILED(MICU_StartSampling(MICU_ENCODING_PCM16_SIGNED, MICU_SAMPLE_RATE_16360,
+                                   0, MAX_AUDIO_BYTES, false))) {
         micExit();
         voice_close(voice);
         fail(voice, "无法开始录音，请检查麦克风。");
@@ -44,15 +45,45 @@ void voice_start(Voice *voice)
 bool voice_recording_finished(const Voice *voice)
 {
     return voice->phase == VOICE_RECORDING &&
-           (osGetTime() - voice->started_at >= 30000 || micGetLastSampleOffset() >= MAX_AUDIO_BYTES);
+           (osGetTime() - voice->started_at >= 30000 || voice->captured >= MAX_AUDIO_BYTES);
+}
+
+static unsigned captured_bytes(const Voice *voice)
+{
+    GSPGPU_InvalidateDataCache(voice->samples + MIC_BUFFER_SIZE - 32, 32);
+    unsigned offset = micGetLastSampleOffset();
+    return (offset < MAX_AUDIO_BYTES ? offset : MAX_AUDIO_BYTES) & ~1u;
+}
+
+void voice_update_level(Voice *voice)
+{
+    voice->captured = captured_bytes(voice);
+    unsigned length = voice->captured < 2048 ? voice->captured : 2048;
+    if (!length) {
+        voice->level = 0;
+        return;
+    }
+    unsigned start = voice->captured - length;
+    GSPGPU_InvalidateDataCache(voice->samples + start, length);
+    const s16 *samples = (const s16 *)(voice->samples + start);
+    int low = samples[0], high = samples[0];
+    for (unsigned i = 1; i < length / 2; i++) {
+        if (samples[i] < low) low = samples[i];
+        if (samples[i] > high) high = samples[i];
+    }
+    unsigned span = high - low;
+    voice->level = 0;
+    for (unsigned threshold = 96; threshold <= span && voice->level < 8; threshold *= 2) {
+        voice->level++;
+    }
 }
 
 bool voice_stop(Voice *voice)
 {
     MICU_StopSampling();
-    unsigned size = micGetLastSampleOffset();
+    voice->length = captured_bytes(voice);
     micExit();
-    voice->length = (size < MAX_AUDIO_BYTES ? size : MAX_AUDIO_BYTES) & ~1u;
+    if (voice->length) GSPGPU_InvalidateDataCache(voice->samples, voice->length);
     voice->phase = VOICE_TRANSCRIBING;
     if (voice->length < 16364 * 2 / 3) {
         voice_close(voice);
@@ -100,6 +131,8 @@ void voice_close(Voice *voice)
     }
     voice->samples = NULL;
     voice->length = 0;
+    voice->captured = 0;
+    voice->level = 0;
     voice->scroll = 0;
     voice->phase = VOICE_CLOSED;
     voice->error[0] = '\0';
@@ -164,13 +197,20 @@ void voice_draw(const Voice *voice, Screen top, Screen bottom, const char *title
             snprintf(elapsed, sizeof(elapsed), "正在录音  %llu / 30 秒",
                      (unsigned long long)((osGetTime() - voice->started_at) / 1000));
             show(top, 26, 55, elapsed, UI_WARNING);
-            show(top, 26, 88, "结束录音后，先检查转写文字。", UI_ACCENT);
+            show(top, 26, 87, "麦克风音量", UI_MUTED);
+            for (unsigned i = 0; i < 8; i++) {
+                fill(top, 26 + 23 * i, 111, 19, 9, i < voice->level ? UI_ACCENT : UI_FOCUS);
+            }
+            show(top, 26, 141, voice->level ? "结束录音后可预览转写。" : "请靠近麦克风说一句完整的话。", UI_TEXT);
             primary = "A 结束并转写";
             back = "B 取消录音";
             break;
         }
         case VOICE_TRANSCRIBING:
-            show(top, 26, 55, "电脑正在本地转写…", UI_TEXT);
+            show(top, 26, 55, "正在上传录音并转写…", UI_TEXT);
+            char duration[64];
+            snprintf(duration, sizeof(duration), "已录制 %.1f 秒", voice->length / 32728.0);
+            show(top, 26, 88, duration, UI_ACCENT);
             back = "B 取消转写";
             break;
         case VOICE_CANCELLING:

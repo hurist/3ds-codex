@@ -17,7 +17,7 @@
 #include <unistd.h>
 
 #define REQUEST_TIMEOUT_MS 12000
-#define VOICE_TIMEOUT_MS 48000
+#define VOICE_TIMEOUT_MS 76000
 #define DISCOVERY_PORT 18765
 
 typedef struct {

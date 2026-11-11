@@ -45,9 +45,8 @@ static const u8 *character_bitmap(u32 code)
     return glyphs + ('?' - ' ') * 64;
 }
 
-Screen screen_init(gfxScreen_t side)
+Screen screen_back_buffer(gfxScreen_t side)
 {
-    gfxSetDoubleBuffering(side, false);
     Screen result;
     result.pixels = gfxGetFramebuffer(side, GFX_LEFT, &result.height, &result.width);
     return result;

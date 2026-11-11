@@ -17,6 +17,8 @@ typedef struct {
     VoicePhase phase;
     u8 *samples;
     unsigned length;
+    unsigned level;
+    unsigned captured;
     unsigned scroll;
     u64 started_at;
     char error[128];
@@ -25,6 +27,7 @@ typedef struct {
 
 void voice_start(Voice *voice);
 bool voice_recording_finished(const Voice *voice);
+void voice_update_level(Voice *voice);
 bool voice_stop(Voice *voice);
 void voice_receive(Voice *voice, const char *response, const char *error);
 void voice_close(Voice *voice);

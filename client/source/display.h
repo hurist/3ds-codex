@@ -9,7 +9,7 @@ typedef struct {
     u16 height;
 } Screen;
 
-Screen screen_init(gfxScreen_t side);
+Screen screen_back_buffer(gfxScreen_t side);
 void fill(Screen screen, int x, int y, int width, int height, u32 rgb);
 void text(Screen screen, int x, int y, const char *start, const char *end, u32 rgb);
 void text_scaled(Screen screen, int x, int y, const char *start, const char *end, u32 rgb, int size);

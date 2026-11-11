@@ -80,7 +80,7 @@ python3 bridge/server.py --revoke 设备编号
 
 在 Linux 上使用 Docker Compose。桥接容器负责加密局域网连接、图片预览和语音转写。主机上的用户服务通过本地 Unix 套接字启动 Codex，继续使用桌面端所在账号和原来的项目路径。Codex 的登录文件和项目目录不需要挂进容器。
 
-1. 用运行 Codex 的账号创建 `~/.local/state/3ds-codex`，在里面建立 `run`、`devices` 和 `voice` 三个目录，权限设为仅当前用户访问。已有配对可将原来的 `devices.json` 放进 `devices/`。本地 Whisper 模型可放到 `voice/model.bin`。
+1. 用运行 Codex 的账号创建 `~/.local/state/3ds-codex`，在里面建立 `run`、`devices` 和 `voice` 三个目录，权限设为仅当前用户访问。已有配对可将原来的 `devices.json` 放进 `devices/`。本地 Whisper 多语言模型可放到 `voice/model.bin`，可使用 [small-q5_1](https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-small-q5_1.bin)。
 2. 写入 `~/.local/state/3ds-codex/host.env`，将路径替换为当前仓库的绝对路径。
 
    ```dotenv
@@ -143,7 +143,7 @@ python3 bridge/server.py --whisper-model /path/to/ggml-base-q5_1.bin
 
 也可通过 `--whisper-cli` 指定程序位置，通过 `--opencc-config` 指定 OpenCC 配置。
 
-1. 打开消息草稿，点「语音听写」。未在组词时，也可按 L。按 A 开始录音。
+1. 打开消息草稿，点「语音听写」。未在组词时，也可按 L。按 A 开始录音，上屏音量条会显示掌机是否收到声音。
 2. 按 A 结束并转写，或按 B 取消录音。每段最多 30 秒，达到上限会结束并转写。电脑在本地处理音频。
 3. 查看中文转写，按 A 插入草稿，按 X 重新录音，或按 B 返回。插入后可以编辑，按 START 才会发送给 Codex。
 

@@ -136,7 +136,7 @@ class Handler(BaseHTTPRequestHandler):
                 or self.headers.get("Transfer-Encoding")):
             self.respond(400, "录音数据格式无效。".encode())
             return
-        self.connection.settimeout(8)
+        self.connection.settimeout(12)
         try:
             pcm = self.rfile.read(int(length))
         except TimeoutError:
@@ -148,6 +148,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             transcript = clean_text(self.server.transcriber.transcribe(pcm)).strip()
         except VoiceError as error:
+            print(f"语音转写失败：{error}", flush=True)
             self.respond(503, str(error).encode())
             return
         data = transcript.encode()
