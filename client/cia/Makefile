@@ -7,7 +7,7 @@ BUILD := ../build
 all: ../3ds-codex.cia
 
 ../3ds-codex.cia: ../3ds-codex.elf Makefile title.rsf $(BUILD)/cia-icon.smdh $(BUILD)/cia-banner.bnr
-	"$(MAKEROM)" -f cia -target t -desc app:4 -exefslogo -rsf title.rsf \
+	"$(MAKEROM)" -f cia -target t -exefslogo -rsf title.rsf \
 	    -elf $< -icon $(BUILD)/cia-icon.smdh -banner $(BUILD)/cia-banner.bnr -o $@
 
 $(BUILD)/cia-icon.smdh: icon.png | $(BUILD)

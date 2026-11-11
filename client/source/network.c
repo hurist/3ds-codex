@@ -62,20 +62,23 @@ static int connect_to_bridge(int fd, const BridgeEndpoint *endpoint, u64 deadlin
     if (errno != EINPROGRESS && errno != EWOULDBLOCK) {
         return -1;
     }
-    if (wait_for_socket(fd, POLLOUT, deadline) < 0) {
-        return -1;
-    }
+    // On hardware the TCP handshake can finish without POLLOUT waking the caller.
+    while (osGetTime() < deadline) {
+        struct sockaddr_in peer = {0};
+        socklen_t peer_length = sizeof(peer);
+        if (getpeername(fd, (struct sockaddr *)&peer, &peer_length) == 0) return 0;
 
-    int error = 0;
-    socklen_t length = sizeof(error);
-    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length) < 0) {
-        return -1;
+        int error = 0;
+        socklen_t length = sizeof(error);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length) == 0 &&
+            error && error != EINPROGRESS && error != EWOULDBLOCK) {
+            errno = error;
+            return -1;
+        }
+        svcSleepThread(20 * 1000 * 1000LL);
     }
-    if (error != 0) {
-        errno = error;
-        return -1;
-    }
-    return 0;
+    errno = ETIMEDOUT;
+    return -1;
 }
 
 static int psk_random(void *unused, unsigned char *buffer, size_t size)
@@ -106,10 +109,21 @@ static int tls_recv(void *context, unsigned char *buffer, size_t size)
 
 static int wait_tls(int fd, int result, u64 deadline)
 {
-    if (result == MBEDTLS_ERR_SSL_WANT_READ || result == MBEDTLS_ERR_SSL_WANT_WRITE) {
-        return wait_for_socket(fd, result == MBEDTLS_ERR_SSL_WANT_READ ? POLLIN : POLLOUT, deadline);
+    if (result != MBEDTLS_ERR_SSL_WANT_READ && result != MBEDTLS_ERR_SSL_WANT_WRITE) {
+        errno = EPROTO;
+        return -1;
     }
-    errno = EPROTO;
+    u64 now = osGetTime();
+    if (now >= deadline) {
+        errno = ETIMEDOUT;
+        return -1;
+    }
+    if (result == MBEDTLS_ERR_SSL_WANT_WRITE) {
+        svcSleepThread(10 * 1000 * 1000LL);
+        return 0;
+    }
+    u64 check = now + 60 < deadline ? now + 60 : deadline;
+    if (wait_for_socket(fd, POLLIN, check) == 0 || errno == ETIMEDOUT) return 0;
     return -1;
 }
 
@@ -125,11 +139,13 @@ static int open_tls(Transport *transport, const BridgeEndpoint *endpoint, u64 de
     mbedtls_ssl_init(&transport->tls);
     mbedtls_ssl_config_init(&transport->config);
     if (R_FAILED(psInit())) {
+        errno = EACCES;
         return -1;
     }
     transport->ps_ready = true;
     if (mbedtls_ssl_config_defaults(&transport->config, MBEDTLS_SSL_IS_CLIENT,
                                     MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT) != 0) {
+        errno = EPROTO;
         return -1;
     }
     mbedtls_ssl_conf_min_version(&transport->config, MBEDTLS_SSL_MAJOR_VERSION_3, MBEDTLS_SSL_MINOR_VERSION_3);
@@ -140,6 +156,7 @@ static int open_tls(Transport *transport, const BridgeEndpoint *endpoint, u64 de
     if (mbedtls_ssl_conf_psk(&transport->config, key, key_length,
                             (const unsigned char *)identity, strlen(identity)) != 0 ||
         mbedtls_ssl_setup(&transport->tls, &transport->config) != 0) {
+        errno = EPROTO;
         return -1;
     }
     mbedtls_ssl_set_bio(&transport->tls, &transport->fd, tls_send, tls_recv, NULL);
@@ -306,9 +323,10 @@ void fetch_bridge(void *context)
                        request->audio_length ? VOICE_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
     u64 deadline = osGetTime() + timeout;
     if (fcntl(fd, F_SETFL, O_NONBLOCK) < 0 || connect_to_bridge(fd, &request->endpoint, deadline) < 0) {
-        snprintf(request->error, sizeof(request->error), "连接失败（%d）。", errno);
+        snprintf(request->error, sizeof(request->error), "TCP 连接失败（%d）。", errno);
     } else if ((request->endpoint.key_length || request->endpoint.direct) && open_tls(&transport, &request->endpoint, deadline) < 0) {
-        snprintf(request->error, sizeof(request->error), "加密连接失败，请检查配对码或设备授权。");
+        snprintf(request->error, sizeof(request->error), errno == EACCES ?
+                 "无法访问掌机的加密随机数服务。" : "加密握手失败（%d）。", errno);
     } else if (send_request(&transport, request, deadline) < 0 ||
                receive_response(&transport, request->response, sizeof(request->response), deadline, &request->response_length) < 0) {
         snprintf(request->error, sizeof(request->error), "请求失败（%d）。", errno);
@@ -411,7 +429,8 @@ void discover_bridge(void *context)
 {
     BridgeRequest *request = context;
     BridgeEndpoint saved = request->endpoint;
-    request->timeout_ms = 1500;
+    request->timeout_ms = 3600;
+    char connection_error[sizeof(request->error)] = "";
     strcpy(request->path, "/health");
     request->message[0] = '\0';
 
@@ -451,6 +470,7 @@ void discover_bridge(void *context)
                 request->timeout_ms = 0;
                 return;
             }
+            snprintf(connection_error, sizeof(connection_error), "%s", request->error);
         }
         if (!direct && *saved.address) {
             request->endpoint = saved;
@@ -458,9 +478,11 @@ void discover_bridge(void *context)
                 request->timeout_ms = 0;
                 return;
             }
+            snprintf(connection_error, sizeof(connection_error), "%s", request->error);
         }
     }
     request->endpoint = saved;
     request->timeout_ms = 0;
-    snprintf(request->error, sizeof(request->error), "未找到可连接的电脑，请检查同一局域网和桥接程序。");
+    snprintf(request->error, sizeof(request->error), "%s",
+             *connection_error ? connection_error : "未找到可连接的电脑，请检查同一局域网和桥接程序。");
 }
