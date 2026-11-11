@@ -1,0 +1,8 @@
+/client/build/
+/client/*.3dsx
+/client/*.elf
+__pycache__/
+/client/*.cia
+*.pair
+*.pair.tmp
+*.pair.bak

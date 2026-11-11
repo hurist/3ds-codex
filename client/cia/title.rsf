@@ -1,0 +1,24 @@
+BasicInfo:
+  Title: 3DSCodex
+  ProductCode: CTR-P-XCDX
+  CompanyCode: "00"
+
+TitleInfo:
+  Category: Application
+  UniqueId: 0xFFCE0
+
+Option:
+  UseOnSD: true
+  FreeProductCode: true
+  EnableCrypt: false
+  EnableCompress: true
+
+AccessControlInfo:
+  CoreVersion: 2
+  DescVersion: 2
+  FileSystemAccess:
+    - DirectSdmc
+    - DirectSdmcWrite
+SystemControlInfo:
+  SaveDataSize: 0KB
+  StackSize: 0x40000
