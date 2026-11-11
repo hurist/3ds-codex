@@ -3,8 +3,8 @@
 
 #include "network.h"
 
-typedef enum { SETUP_MENU, SETUP_FORM, SETUP_BUSY, SETUP_CLOSED } SetupPhase;
-typedef enum { SETUP_IDLE, SETUP_CONNECT, SETUP_PAIR } SetupAction;
+typedef enum { SETUP_MENU, SETUP_FORM, SETUP_BUSY, SETUP_DISCOVER, SETUP_CLOSED } SetupPhase;
+typedef enum { SETUP_IDLE, SETUP_CONNECT, SETUP_PAIR, SETUP_SEARCH } SetupAction;
 
 typedef struct {
     SetupPhase phase;
@@ -20,6 +20,7 @@ typedef struct {
 
 void setup_load(Setup *setup);
 SetupAction setup_input(Setup *setup, u32 pressed, u32 repeat, BridgeEndpoint *endpoint);
+bool setup_discovered(Setup *setup, const BridgeRequest *request, BridgeEndpoint *endpoint);
 bool setup_receive(Setup *setup, const BridgeRequest *request, BridgeEndpoint *endpoint);
 void setup_draw(Screen top, Screen bottom, const Setup *setup);
 

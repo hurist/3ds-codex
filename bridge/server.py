@@ -3,7 +3,8 @@
 import argparse
 import errno
 from datetime import datetime
-from ipaddress import IPv4Address
+from contextlib import nullcontext
+from ipaddress import IPv4Address, IPv4Network
 import os
 from pathlib import Path
 import ssl
@@ -18,6 +19,7 @@ from codex import CodexError, Library, MAX_REVIEW_BYTES, thread_title
 from voice import MAX_AUDIO_BYTES, Transcriber, VoiceError
 from lan import DEVICE_ID, DeviceStore, LanServer
 from images import Attachment
+from discovery import advertise
 
 
 PAGE_SIZE = 9
@@ -100,7 +102,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self.valid_host():
             return False
         if isinstance(self.server, LanServer):
-            return bool(self.server.devices.key(getattr(self.connection, "device_identity", None)))
+            return getattr(self.connection, "lan_direct", False) or bool(
+                self.server.devices.key(getattr(self.connection, "device_identity", None)))
         return True
 
     def pair(self):
@@ -382,6 +385,9 @@ def main():
     parser.add_argument("--port", type=int, help="默认端口为本机 8765、局域网 8766")
     parser.add_argument("--lan-address", help="监听指定的局域网 IPv4 地址并启用加密")
     parser.add_argument("--pair", action="store_true", help="生成一次性配对码")
+    parser.add_argument("--direct-network", type=IPv4Network,
+                        default=os.environ.get("THREEDS_CODEX_DIRECT_NETWORK") or None,
+                        help="允许此局域网网段的设备免配对直连")
     parser.add_argument("--wait-for-address", action="store_true", help="启动时等待局域网地址可用")
     parser.add_argument("--devices-file", default=Path(os.environ.get(
         "XDG_CONFIG_HOME", Path.home() / ".config")) / "3ds-codex" / "devices.json")
@@ -403,8 +409,8 @@ def main():
             parser.error("找不到该设备。")
         print("已撤销设备。")
         return
-    if args.pair and not args.lan_address:
-        parser.error("--pair 需要同时指定 --lan-address。")
+    if (args.pair or args.direct_network) and not args.lan_address:
+        parser.error("配对和局域网直连需要同时指定 --lan-address。")
     if args.port is not None and not 0 <= args.port <= 65535:
         parser.error("端口必须在 0 至 65535 之间。")
     if args.lan_address:
@@ -414,12 +420,14 @@ def main():
                 raise ValueError
         except ValueError:
             parser.error("请输入电脑的局域网 IPv4 地址。")
+        if args.direct_network is not None and (address not in args.direct_network or not args.direct_network.is_private):
+            parser.error("直连网段必须是包含桥接地址的私有 IPv4 网段。")
         if not getattr(ssl, "HAS_PSK", False):
             parser.error("加密局域网模式需要支持 PSK 的 Python 3.13 或更新版本。")
         port = 8766 if args.port is None else args.port
         while True:
             try:
-                server_instance = LanServer((str(address), port), Handler, store, args.pair)
+                server_instance = LanServer((str(address), port), Handler, store, args.pair, args.direct_network)
                 break
             except OSError as error:
                 if not args.wait_for_address or error.errno != errno.EADDRNOTAVAIL:
@@ -445,7 +453,9 @@ def main():
         else:
             print(f"3DS Codex bridge: http://{host}:{port}/health", flush=True)
         try:
-            server.serve_forever()
+            discovery = advertise(host, port, server.direct_network) if isinstance(server, LanServer) else nullcontext()
+            with discovery:
+                server.serve_forever()
         except KeyboardInterrupt:
             pass
         finally:

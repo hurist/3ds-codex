@@ -54,6 +54,7 @@ typedef enum {
     ANSWER_INPUT,
     TRANSCRIBE_VOICE,
     PAIR_DEVICE,
+    DISCOVER_BRIDGE,
 } RequestKind;
 
 typedef struct {
@@ -419,7 +420,7 @@ static void render(Screen top, Screen bottom, View view, bool loaded, bool loadi
     const char *title = !loaded ? "3DS Codex" : view.kind == PROJECTS ? "你的项目" :
                         view.kind == APPROVAL ? approval_label() : heading;
     const char *detail = loaded ? view.kind == APPROVAL || (view.kind == HISTORY && pending) ? "待审批" :
-                         needs_input ? "待回答" : view.kind == PROJECTS && endpoint->key_length ? "局域网" : page : NULL;
+                         needs_input ? "待回答" : view.kind == PROJECTS && (endpoint->key_length || endpoint->direct) ? "局域网" : page : NULL;
     ui_title(top, title, detail, view.kind == APPROVAL || pending || needs_input ? UI_WARNING : UI_ACCENT);
     ui_connection(bottom, *error ? "连接或请求失败" : loading ? "正在连接…" : loaded ? "已连接" : "正在准备…",
                   *error ? UI_WARNING : loaded ? UI_ACCENT : UI_MUTED);
@@ -477,7 +478,7 @@ static void render(Screen top, Screen bottom, View view, bool loaded, bool loadi
             ui_button(bottom, third_right, "X 刷新", UI_SECONDARY);
             char address[64];
             snprintf(address, sizeof(address), "%s  %s:%u",
-                     endpoint->key_length ? "局域网加密" : "本机模拟", endpoint->address, endpoint->port);
+                     endpoint->direct ? "局域网直连" : endpoint->key_length ? "局域网加密" : "本机模拟", endpoint->address, endpoint->port);
             show_text(bottom, 16, 200, *notice ? notice : address, UI_MUTED);
         } else {
             ui_button(bottom, (Rect){16, 152, 288, 37}, "B 返回项目", UI_SECONDARY);
@@ -670,6 +671,12 @@ int main(void)
     }
     bool composing = false;
     RequestKind job = READ_VIEW;
+    if (network_ready) {
+        endpoint = setup.saved;
+        setup.phase = SETUP_DISCOVER;
+        job = DISCOVER_BRIDGE;
+        fetch = true;
+    }
     RequestKind retry = READ_VIEW;
     char compose_turn[97] = "";
     char stop_turn[97] = "";
@@ -723,8 +730,10 @@ int main(void)
         if (worker && threadJoin(worker, 0) == 0) {
             threadFree(worker);
             worker = NULL;
-            if (job == PAIR_DEVICE) {
-                if (setup_receive(&setup, &request, &endpoint)) {
+            if (job == PAIR_DEVICE || job == DISCOVER_BRIDGE) {
+                bool connected = job == PAIR_DEVICE ? setup_receive(&setup, &request, &endpoint) :
+                                                     setup_discovered(&setup, &request, &endpoint);
+                if (connected) {
                     next = (View){.kind = PROJECTS};
                     current = PROJECTS;
                     loaded = false;
@@ -876,6 +885,9 @@ int main(void)
                     next = (View){.kind = PROJECTS};
                     current = PROJECTS;
                     loaded = false;
+                    fetch = true;
+                } else if (action == SETUP_SEARCH) {
+                    job = DISCOVER_BRIDGE;
                     fetch = true;
                 } else if (action == SETUP_PAIR) {
                     snprintf(request.path, sizeof(request.path), "/pair");
@@ -1134,11 +1146,15 @@ int main(void)
             }
             refresh = false;
             request.endpoint = endpoint;
-            worker = threadCreate(fetch_bridge, &request, 48 * 1024, 0x30, -2, false);
+            worker = threadCreate(job == DISCOVER_BRIDGE ? discover_bridge : fetch_bridge,
+                                  &request, 48 * 1024, 0x30, -2, false);
             if (!worker) {
                 if (job == PAIR_DEVICE) {
                     snprintf(request.error, sizeof(request.error), "无法发起配对，请重试。");
                     setup_receive(&setup, &request, &endpoint);
+                } else if (job == DISCOVER_BRIDGE) {
+                    snprintf(request.error, sizeof(request.error), "无法发起局域网搜索。");
+                    setup_discovered(&setup, &request, &endpoint);
                 } else if (job == READ_PICTURE) {
                     snprintf(pictures.error, sizeof(pictures.error), "无法发起图片请求。");
                 } else if (job == TRANSCRIBE_VOICE) {

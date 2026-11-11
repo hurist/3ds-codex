@@ -168,10 +168,14 @@ SetupAction setup_input(Setup *setup, u32 pressed, u32 repeat, BridgeEndpoint *e
             setup->notice[0] = '\0';
             return SETUP_IDLE;
         }
-        if (first || local) {
-            *endpoint = first && setup->saved.key_length ? setup->saved :
-                (BridgeEndpoint){.address = "127.0.0.1", .port = 8765};
+        if (local) {
+            *endpoint = (BridgeEndpoint){.address = "127.0.0.1", .port = 8765};
             return SETUP_CONNECT;
+        }
+        if (first) {
+            *endpoint = setup->saved;
+            setup->phase = SETUP_DISCOVER;
+            return SETUP_SEARCH;
         }
         return SETUP_IDLE;
     }
@@ -211,18 +215,44 @@ SetupAction setup_input(Setup *setup, u32 pressed, u32 repeat, BridgeEndpoint *e
     }
     if ((pressed & KEY_START) || (toolbar && touch.px >= 210)) {
         unsigned long port = strtoul(setup->port, NULL, 10);
-        if (!valid_address(setup->address) || !port || port > 65535 || strlen(setup->code) != 20) {
-            snprintf(setup->notice, sizeof(setup->notice), "请输入有效地址、端口和 20 位配对码。");
+        if (!valid_address(setup->address) || !port || port > 65535 ||
+            (*setup->code && strlen(setup->code) != 20)) {
+            snprintf(setup->notice, sizeof(setup->notice), "请检查地址、端口和配对码。");
             return SETUP_IDLE;
         }
-        *endpoint = (BridgeEndpoint){.port = (unsigned)port, .identity = "pair", .key_length = 20};
+        *endpoint = (BridgeEndpoint){.port = (unsigned)port};
         memcpy(endpoint->address, setup->address, sizeof(endpoint->address));
+        if (!*setup->code) {
+            endpoint->direct = true;
+            return SETUP_CONNECT;
+        }
+        strcpy(endpoint->identity, "pair");
+        endpoint->key_length = 20;
         memcpy(endpoint->key, setup->code, 20);
         setup->phase = SETUP_BUSY;
         setup->notice[0] = '\0';
         return SETUP_PAIR;
     }
     return SETUP_IDLE;
+}
+
+bool setup_discovered(Setup *setup, const BridgeRequest *request, BridgeEndpoint *endpoint)
+{
+    if (*request->error) {
+        setup->phase = SETUP_MENU;
+        snprintf(setup->notice, sizeof(setup->notice), "%s", request->error);
+        return false;
+    }
+    *endpoint = request->endpoint;
+    setup->phase = SETUP_CLOSED;
+    setup->notice[0] = '\0';
+    memcpy(setup->address, endpoint->address, sizeof(setup->address));
+    snprintf(setup->port, sizeof(setup->port), "%u", endpoint->port);
+    if (endpoint->key_length && (strcmp(setup->saved.address, endpoint->address) || setup->saved.port != endpoint->port)) {
+        setup->saved = *endpoint;
+        save_endpoint(endpoint);
+    }
+    return true;
 }
 
 bool setup_receive(Setup *setup, const BridgeRequest *request, BridgeEndpoint *endpoint)
@@ -265,23 +295,20 @@ void setup_draw(Screen top, Screen bottom, const Setup *setup)
     ui_clear(top);
     ui_clear(bottom);
     ui_title(top, "连接 Codex", NULL, UI_MUTED);
+    if (setup->phase == SETUP_DISCOVER) {
+        line(top, 16, 57, "正在搜索局域网电脑…", UI_ACCENT);
+        line(top, 16, 96, "请让掌机和电脑连接同一个局域网。", UI_MUTED);
+        return;
+    }
     if (setup->phase == SETUP_MENU) {
-        line(top, 12, 62, "选择连接方式", UI_TEXT);
-        if (setup->saved.key_length) {
-            char host[64];
-            snprintf(host, sizeof(host), "已配对电脑  %s:%u", setup->saved.address, setup->saved.port);
-            line(top, 12, 100, host, UI_ACCENT);
-            snprintf(host, sizeof(host), "设备编号  %s", setup->saved.identity);
-            line(top, 12, 132, host, UI_TEXT);
-            button(bottom, 10, 48, 300, 36, "A 连接已配对电脑", UI_PRIMARY);
-            button(bottom, 10, 142, 300, 36, "Y 本机模拟器", UI_SECONDARY);
-        } else {
-            line(top, 12, 100, "真机与电脑需连到同一局域网。", UI_ACCENT);
-            button(bottom, 10, 48, 300, 36, "A 本机模拟器", UI_SECONDARY);
-        }
-        button(bottom, 10, 95, 300, 36, "X 配对局域网电脑", UI_PRIMARY);
+        line(top, 16, 62, "搜索电脑上的 Codex 桥接", UI_TEXT);
+        line(top, 16, 100, "请让掌机和电脑连接同一个局域网。", UI_ACCENT);
+        button(bottom, 10, 48, 300, 36, "A 重新搜索电脑", UI_PRIMARY);
+        button(bottom, 10, 95, 300, 36, "X 手动连接", UI_SECONDARY);
+        button(bottom, 10, 142, 300, 36, "Y 本机模拟器", UI_SECONDARY);
         if (*setup->notice) {
-            line(top, 12, 155, setup->notice, UI_WARNING);
+            line(top, 16, 150, setup->notice, UI_WARNING);
+            line(top, 16, 170, line_end(setup->notice, 368), UI_WARNING);
         }
         line(bottom, 12, 220, "START 退出", UI_TEXT);
         return;
@@ -302,7 +329,7 @@ void setup_draw(Screen top, Screen bottom, const Setup *setup)
         line(bottom, 12, 80, "正在建立加密连接…", UI_ACCENT);
         return;
     }
-    line(bottom, 8, 12, "输入电脑终端显示的配对码", UI_ACCENT);
+    line(bottom, 8, 12, "直连可留空配对码", UI_ACCENT);
     for (unsigned row = 0; row < 4; row++) {
         for (unsigned column = 0; column < 10; column++) {
             char key[] = {keys[row][column], '\0'};
@@ -312,6 +339,6 @@ void setup_draw(Screen top, Screen bottom, const Setup *setup)
     }
     button(bottom, 5, 180, 96, 34, "Y 删除", UI_SECONDARY);
     button(bottom, 105, 180, 104, 34, "SELECT 换项", UI_SECONDARY);
-    button(bottom, 215, 180, 100, 34, "START 配对", UI_PRIMARY);
+    button(bottom, 215, 180, 100, 34, "START 连接", UI_PRIMARY);
     line(bottom, 8, 220, "A 输入   B 返回", UI_TEXT);
 }

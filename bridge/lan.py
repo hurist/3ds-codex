@@ -4,6 +4,7 @@ import base64
 import fcntl
 from http.server import ThreadingHTTPServer
 import json
+from ipaddress import IPv4Address
 import os
 from pathlib import Path
 import re
@@ -18,6 +19,9 @@ DEVICE_ID = re.compile(r"[0-9a-f]{16}\Z")
 DEVICE_KEY = re.compile(r"[0-9a-f]{64}\Z")
 PAIR_SECONDS = 600
 TLS_CIPHER = "PSK-AES128-GCM-SHA256"
+DIRECT_CIPHER = "ECDHE-PSK-AES128-CBC-SHA256"
+DIRECT_IDENTITY = "lan-direct"
+DIRECT_KEY = b"3DS-CODEX-LAN-DIRECT-V1"
 
 
 class DeviceStore:
@@ -77,8 +81,9 @@ class DeviceStore:
 
 
 class LanServer(ThreadingHTTPServer):
-    def __init__(self, address, handler, store, pairing):
+    def __init__(self, address, handler, store, pairing, direct_network=None):
         self.devices = store
+        self.direct_network = direct_network
         self.code = None
         self.pair_until = 0
         self.pair_lock = Lock()
@@ -87,7 +92,7 @@ class LanServer(ThreadingHTTPServer):
         self.connection = local()
         self.context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self.context.minimum_version = self.context.maximum_version = ssl.TLSVersion.TLSv1_2
-        self.context.set_ciphers(TLS_CIPHER)
+        self.context.set_ciphers(f"{TLS_CIPHER}:{DIRECT_CIPHER}" if direct_network else TLS_CIPHER)
         self.context.options |= ssl.OP_NO_TICKET
         self.context.set_psk_server_callback(self.psk)
         super().__init__(address, handler)
@@ -99,6 +104,11 @@ class LanServer(ThreadingHTTPServer):
             return self.code
 
     def psk(self, identity):
+        if identity == DIRECT_IDENTITY:
+            if self.connection.direct_allowed:
+                self.connection.identity = DIRECT_IDENTITY
+                return DIRECT_KEY
+            return b""
         if identity == "pair":
             with self.pair_lock:
                 if self.code and monotonic() < self.pair_until:
@@ -120,12 +130,17 @@ class LanServer(ThreadingHTTPServer):
 
     def process_request_thread(self, request, client_address):
         self.connection.identity = None
+        self.connection.direct_allowed = (self.direct_network is not None and
+                                          IPv4Address(client_address[0]) in self.direct_network)
         try:
             request.settimeout(8)
             with self.context.wrap_socket(request, server_side=True) as connection:
                 if self.connection.identity is None:
                     return
                 connection.device_identity = self.connection.identity
+                connection.lan_direct = connection.device_identity == DIRECT_IDENTITY
+                if connection.lan_direct and connection.cipher()[0] != DIRECT_CIPHER:
+                    return
                 self.finish_request(connection, client_address)
         except (OSError, ssl.SSLError):
             pass

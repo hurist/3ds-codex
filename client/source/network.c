@@ -18,6 +18,7 @@
 
 #define REQUEST_TIMEOUT_MS 12000
 #define VOICE_TIMEOUT_MS 48000
+#define DISCOVERY_PORT 18765
 
 typedef struct {
     int fd;
@@ -115,6 +116,11 @@ static int wait_tls(int fd, int result, u64 deadline)
 static int open_tls(Transport *transport, const BridgeEndpoint *endpoint, u64 deadline)
 {
     static const int ciphers[] = {MBEDTLS_TLS_PSK_WITH_AES_128_GCM_SHA256, 0};
+    static const int direct_ciphers[] = {MBEDTLS_TLS_ECDHE_PSK_WITH_AES_128_CBC_SHA256, 0};
+    static const unsigned char direct_key[] = "3DS-CODEX-LAN-DIRECT-V1";
+    const char *identity = endpoint->direct ? "lan-direct" : endpoint->identity;
+    const unsigned char *key = endpoint->direct ? direct_key : endpoint->key;
+    size_t key_length = endpoint->direct ? sizeof(direct_key) - 1 : endpoint->key_length;
     transport->secure = true;
     mbedtls_ssl_init(&transport->tls);
     mbedtls_ssl_config_init(&transport->config);
@@ -128,11 +134,11 @@ static int open_tls(Transport *transport, const BridgeEndpoint *endpoint, u64 de
     }
     mbedtls_ssl_conf_min_version(&transport->config, MBEDTLS_SSL_MAJOR_VERSION_3, MBEDTLS_SSL_MINOR_VERSION_3);
     mbedtls_ssl_conf_max_version(&transport->config, MBEDTLS_SSL_MAJOR_VERSION_3, MBEDTLS_SSL_MINOR_VERSION_3);
-    mbedtls_ssl_conf_ciphersuites(&transport->config, ciphers);
+    mbedtls_ssl_conf_ciphersuites(&transport->config, endpoint->direct ? direct_ciphers : ciphers);
     mbedtls_ssl_conf_authmode(&transport->config, MBEDTLS_SSL_VERIFY_NONE);
     mbedtls_ssl_conf_rng(&transport->config, psk_random, NULL);
-    if (mbedtls_ssl_conf_psk(&transport->config, endpoint->key, endpoint->key_length,
-                            (const unsigned char *)endpoint->identity, strlen(endpoint->identity)) != 0 ||
+    if (mbedtls_ssl_conf_psk(&transport->config, key, key_length,
+                            (const unsigned char *)identity, strlen(identity)) != 0 ||
         mbedtls_ssl_setup(&transport->tls, &transport->config) != 0) {
         return -1;
     }
@@ -296,10 +302,12 @@ void fetch_bridge(void *context)
         return;
     }
 
-    u64 deadline = osGetTime() + (request->audio_length ? VOICE_TIMEOUT_MS : REQUEST_TIMEOUT_MS);
+    unsigned timeout = request->timeout_ms ? request->timeout_ms :
+                       request->audio_length ? VOICE_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+    u64 deadline = osGetTime() + timeout;
     if (fcntl(fd, F_SETFL, O_NONBLOCK) < 0 || connect_to_bridge(fd, &request->endpoint, deadline) < 0) {
         snprintf(request->error, sizeof(request->error), "连接失败（%d）。", errno);
-    } else if (request->endpoint.key_length && open_tls(&transport, &request->endpoint, deadline) < 0) {
+    } else if ((request->endpoint.key_length || request->endpoint.direct) && open_tls(&transport, &request->endpoint, deadline) < 0) {
         snprintf(request->error, sizeof(request->error), "加密连接失败，请检查配对码或设备授权。");
     } else if (send_request(&transport, request, deadline) < 0 ||
                receive_response(&transport, request->response, sizeof(request->response), deadline, &request->response_length) < 0) {
@@ -327,4 +335,118 @@ void fetch_bridge(void *context)
         }
     }
     close_transport(&transport);
+}
+
+
+static bool check_discovered(BridgeRequest *request)
+{
+    fetch_bridge(request);
+    return !*request->error && !strcmp(request->response, "3ds-codex-bridge/1\n");
+}
+
+void discover_bridge(void *context)
+{
+    BridgeRequest *request = context;
+    BridgeEndpoint saved = request->endpoint;
+    request->timeout_ms = 1500;
+    strcpy(request->path, "/health");
+    request->message[0] = '\0';
+
+    struct {
+        struct sockaddr_in address;
+        bool direct;
+    } peers[6];
+    unsigned count = 0;
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd >= 0) {
+        const char query[] = "3DS-CODEX-DISCOVER-1";
+        const char marker[] = "3DS-CODEX-BRIDGE-1 ";
+        struct sockaddr_in destination = {.sin_family = AF_INET, .sin_port = htons(DISCOVERY_PORT),
+                                         .sin_addr.s_addr = INADDR_BROADCAST};
+        int enable = 1;
+        setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &enable, sizeof(enable));
+        fcntl(fd, F_SETFL, O_NONBLOCK);
+        struct in_addr ip = {0}, mask = {0}, broadcast = {0};
+        bool have_ip = SOCU_GetIPInfo(&ip, &mask, &broadcast) == 0;
+        bool sent_broadcast = false;
+        if (have_ip && broadcast.s_addr) {
+            destination.sin_addr = broadcast;
+            sent_broadcast = sendto(fd, query, sizeof(query) - 1, 0,
+                                    (struct sockaddr *)&destination, sizeof(destination)) > 0;
+        }
+        destination.sin_addr.s_addr = INADDR_BROADCAST;
+        if (sendto(fd, query, sizeof(query) - 1, 0, (struct sockaddr *)&destination, sizeof(destination)) > 0) {
+            sent_broadcast = true;
+        }
+        destination.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        sendto(fd, query, sizeof(query) - 1, 0, (struct sockaddr *)&destination, sizeof(destination));
+
+        if (!sent_broadcast && have_ip) {
+            u32 local = ntohl(ip.s_addr);
+            bool private_ip = (local >> 24) == 10 || (local >> 20) == 0xac1 || (local >> 16) == 0xc0a8;
+            if (private_ip) {
+                u32 subnet_mask = ntohl(mask.s_addr) | 0xffffff00u;
+                u32 start = (local & subnet_mask) + 1;
+                u32 end = (local | ~subnet_mask);
+                for (u32 peer = start; peer < end; peer++) {
+                    if (peer == local) continue;
+                    destination.sin_addr.s_addr = htonl(peer);
+                    sendto(fd, query, sizeof(query) - 1, 0, (struct sockaddr *)&destination, sizeof(destination));
+                }
+            }
+        }
+
+        u64 deadline = osGetTime() + 950;
+        while (count < sizeof(peers) / sizeof(peers[0]) && wait_for_socket(fd, POLLIN, deadline) == 0) {
+            char reply[64];
+            struct sockaddr_in peer = {0};
+            socklen_t size = sizeof(peer);
+            ssize_t length = recvfrom(fd, reply, sizeof(reply) - 1, 0, (struct sockaddr *)&peer, &size);
+            if (length <= (ssize_t)(sizeof(marker) - 1)) continue;
+            reply[length] = '\0';
+            if (peer.sin_port != htons(DISCOVERY_PORT) || strncmp(reply, marker, sizeof(marker) - 1)) continue;
+            char *end;
+            unsigned long port = strtoul(reply + sizeof(marker) - 1, &end, 10);
+            bool direct = strcmp(end, " direct") == 0;
+            if ((!direct && *end) || !port || port > 65535) continue;
+            peer.sin_port = htons((u16)port);
+            bool duplicate = false;
+            for (unsigned i = 0; i < count; i++) {
+                if (peers[i].address.sin_addr.s_addr == peer.sin_addr.s_addr && peers[i].address.sin_port == peer.sin_port) {
+                    duplicate = true;
+                }
+            }
+            if (!duplicate) {
+                peers[count].address = peer;
+                peers[count++].direct = direct;
+            }
+        }
+        close(fd);
+    }
+    for (unsigned pass = 0; pass < 2; pass++) {
+        bool direct = pass != 0;
+        if (!direct && !saved.key_length) continue;
+        for (unsigned i = 0; i < count; i++) {
+            if (direct && !peers[i].direct) continue;
+            request->endpoint = saved;
+            request->endpoint.direct = direct;
+            if (direct) request->endpoint.key_length = 0;
+            if (!inet_ntop(AF_INET, &peers[i].address.sin_addr, request->endpoint.address, sizeof(saved.address))) continue;
+            request->endpoint.port = ntohs(peers[i].address.sin_port);
+            if (check_discovered(request)) {
+                request->timeout_ms = 0;
+                return;
+            }
+        }
+        if (!direct && *saved.address) {
+            request->endpoint = saved;
+            if (check_discovered(request)) {
+                request->timeout_ms = 0;
+                return;
+            }
+        }
+    }
+    request->endpoint = saved;
+    request->timeout_ms = 0;
+    snprintf(request->error, sizeof(request->error), "未找到可连接的电脑，请检查同一局域网和桥接程序。");
 }

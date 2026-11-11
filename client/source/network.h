@@ -12,6 +12,7 @@ typedef struct {
     char identity[17];
     unsigned char key[32];
     size_t key_length;
+    bool direct;
 } BridgeEndpoint;
 
 typedef struct {
@@ -23,11 +24,13 @@ typedef struct {
     const void *audio;
     size_t audio_length;
     bool rejected;
+    unsigned timeout_ms;
     size_t response_length;
     char response[608 * 1024];
     char error[128];
 } BridgeRequest;
 
 void fetch_bridge(void *context);
+void discover_bridge(void *context);
 
 #endif
