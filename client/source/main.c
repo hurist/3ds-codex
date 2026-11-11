@@ -700,6 +700,9 @@ int main(void)
         u32 pressed = hidKeysDown();
         u32 repeat = hidKeysDownRepeat();
         u32 held = hidKeysHeld();
+        if ((setup.phase == SETUP_FORM || composing) && (hidKeysUp() & (KEY_A | KEY_TOUCH))) {
+            redraw = true;
+        }
         if (!composing && !form_open && setup.phase != SETUP_FORM && setup.phase != SETUP_BUSY &&
             (pressed & KEY_START)) {
             break;
@@ -1175,7 +1178,7 @@ int main(void)
         }
         if (redraw) {
             if (setup.phase != SETUP_CLOSED) {
-                setup_draw(top, bottom, &setup);
+                setup_draw(top, bottom, &setup, held);
                 gfxFlushBuffers();
                 gfxSwapBuffers();
             } else if (voice.phase != VOICE_CLOSED) {
@@ -1189,7 +1192,7 @@ int main(void)
                 gfxSwapBuffers();
             } else if (composing) {
                 composer_draw(editor, top, bottom, form_open ? "回答 Codex" : heading,
-                              *compose_turn != 0, *clipboard != 0, form_open);
+                              *compose_turn != 0, *clipboard != 0, form_open, held);
                 gfxFlushBuffers();
                 gfxSwapBuffers();
             } else if (pictures.open) {

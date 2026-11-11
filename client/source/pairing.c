@@ -17,7 +17,25 @@ enum {
     GRID_HEIGHT = 30,
 };
 
-static const char *keys[] = {"1234567890", "qwertyuiop", "asdfghjkl.", "zxcvbnm---"};
+static const char *number_keys[] = {"123", "456", "789", ".0"};
+static const char *pair_keys[] = {"1234567890", "qwertyuiop", "asdfghjkl.", "zxcvbnm---"};
+
+static const Rect search_button = {10, 42, 300, 34};
+static const Rect direct_button = {10, 86, 300, 34};
+static const Rect pair_button = {10, 130, 300, 34};
+static const Rect simulator_button = {10, 174, 300, 34};
+
+static const char *key_row(const Setup *setup, unsigned row)
+{
+    return setup->pairing ? pair_keys[row] : number_keys[row];
+}
+
+static Rect key_rect(const Setup *setup, unsigned row, unsigned column)
+{
+    int y = GRID_TOP + GRID_HEIGHT * row;
+    return setup->pairing ? (Rect){5 + 31 * column, y, 29, 28} :
+                            (Rect){10 + 102 * column, y, 96, 28};
+}
 
 static bool valid_address(const char *value)
 {
@@ -159,12 +177,16 @@ SetupAction setup_input(Setup *setup, u32 pressed, u32 repeat, BridgeEndpoint *e
         hidTouchRead(&touch);
     }
     if (setup->phase == SETUP_MENU) {
-        bool first = (pressed & KEY_A) || (touch.py >= 48 && touch.py < 84);
-        bool pair = (pressed & KEY_X) || (touch.py >= 95 && touch.py < 131);
-        bool local = (pressed & KEY_Y) || (touch.py >= 142 && touch.py < 178);
-        if (pair) {
+        bool first = (pressed & KEY_A) || ui_hit(search_button, touch);
+        bool direct = (pressed & KEY_X) || ui_hit(direct_button, touch);
+        bool pair = (pressed & KEY_L) || ui_hit(pair_button, touch);
+        bool local = (pressed & KEY_Y) || ui_hit(simulator_button, touch);
+        if (direct || pair) {
+            setup->pairing = pair;
+            setup->keypad_focus = false;
             setup->phase = SETUP_FORM;
             setup->field = setup->row = setup->column = 0;
+            setup->code[0] = '\0';
             setup->notice[0] = '\0';
             return SETUP_IDLE;
         }
@@ -190,7 +212,7 @@ SetupAction setup_input(Setup *setup, u32 pressed, u32 repeat, BridgeEndpoint *e
     }
     bool toolbar = touch.py >= 180 && touch.py < 214;
     if ((pressed & KEY_SELECT) || (toolbar && touch.px >= 105 && touch.px < 210)) {
-        setup->field = (setup->field + 1) % 3;
+        setup->field = (setup->field + 1) % (setup->pairing ? 3 : 2);
     }
     if ((repeat & KEY_Y) || (toolbar && touch.px < 105)) {
         char *target = setup->field == 0 ? setup->address : setup->field == 1 ? setup->port : setup->code;
@@ -199,30 +221,41 @@ SetupAction setup_input(Setup *setup, u32 pressed, u32 repeat, BridgeEndpoint *e
             target[length - 1] = '\0';
         }
     }
+    if (repeat & (KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT)) setup->keypad_focus = true;
     if (repeat & KEY_UP) setup->row = (setup->row + 3) % 4;
     else if (repeat & KEY_DOWN) setup->row = (setup->row + 1) % 4;
-    if (repeat & KEY_LEFT) setup->column = (setup->column + 9) % 10;
-    else if (repeat & KEY_RIGHT) setup->column = (setup->column + 1) % 10;
+    unsigned columns = strlen(key_row(setup, setup->row));
+    if (setup->column >= columns) setup->column = columns - 1;
+    if (repeat & KEY_LEFT) setup->column = (setup->column + columns - 1) % columns;
+    else if (repeat & KEY_RIGHT) setup->column = (setup->column + 1) % columns;
 
     bool pick = (pressed & KEY_A) != 0;
-    if (touch.py >= GRID_TOP && touch.py < GRID_TOP + GRID_HEIGHT * 4 && touch.px >= 5 && touch.px < 315) {
-        setup->row = (touch.py - GRID_TOP) / GRID_HEIGHT;
-        setup->column = (touch.px - 5) / 31;
-        pick = true;
+    if (pressed & KEY_TOUCH) {
+        setup->keypad_focus = false;
+        for (unsigned row = 0; row < 4; row++) {
+            for (unsigned column = 0; key_row(setup, row)[column]; column++) {
+                if (ui_hit(key_rect(setup, row, column), touch)) {
+                    setup->row = row;
+                    setup->column = column;
+                    pick = true;
+                }
+            }
+        }
     }
     if (pick) {
-        select_key(setup, keys[setup->row][setup->column]);
+        select_key(setup, key_row(setup, setup->row)[setup->column]);
     }
     if ((pressed & KEY_START) || (toolbar && touch.px >= 210)) {
         unsigned long port = strtoul(setup->port, NULL, 10);
         if (!valid_address(setup->address) || !port || port > 65535 ||
-            (*setup->code && strlen(setup->code) != 20)) {
-            snprintf(setup->notice, sizeof(setup->notice), "请检查地址、端口和配对码。");
+            (setup->pairing && strlen(setup->code) != 20)) {
+            snprintf(setup->notice, sizeof(setup->notice), "%s", setup->pairing ?
+                     "请检查地址、端口和 20 位配对码。" : "请检查电脑地址和端口。");
             return SETUP_IDLE;
         }
         *endpoint = (BridgeEndpoint){.port = (unsigned)port};
         memcpy(endpoint->address, setup->address, sizeof(endpoint->address));
-        if (!*setup->code) {
+        if (!setup->pairing) {
             endpoint->direct = true;
             return SETUP_CONNECT;
         }
@@ -290,11 +323,13 @@ static void button(Screen screen, int x, int y, int width, int height, const cha
     ui_button(screen, (Rect){x, y, width, height}, label, tone);
 }
 
-void setup_draw(Screen top, Screen bottom, const Setup *setup)
+void setup_draw(Screen top, Screen bottom, const Setup *setup, u32 held)
 {
     ui_clear(top);
     ui_clear(bottom);
-    ui_title(top, "连接 Codex", NULL, UI_MUTED);
+    const char *title = setup->phase == SETUP_FORM || setup->phase == SETUP_BUSY ?
+                        setup->pairing ? "设备配对" : "手动直连" : "连接 Codex";
+    ui_title(top, title, NULL, UI_MUTED);
     if (setup->phase == SETUP_DISCOVER) {
         line(top, 16, 57, "正在搜索局域网电脑…", UI_ACCENT);
         line(top, 16, 96, "请让掌机和电脑连接同一个局域网。", UI_MUTED);
@@ -303,9 +338,10 @@ void setup_draw(Screen top, Screen bottom, const Setup *setup)
     if (setup->phase == SETUP_MENU) {
         line(top, 16, 62, "搜索电脑上的 Codex 桥接", UI_TEXT);
         line(top, 16, 100, "请让掌机和电脑连接同一个局域网。", UI_ACCENT);
-        button(bottom, 10, 48, 300, 36, "A 重新搜索电脑", UI_PRIMARY);
-        button(bottom, 10, 95, 300, 36, "X 手动连接", UI_SECONDARY);
-        button(bottom, 10, 142, 300, 36, "Y 本机模拟器", UI_SECONDARY);
+        ui_button(bottom, search_button, "A 重新搜索电脑", UI_PRIMARY);
+        ui_button(bottom, direct_button, "X 手动直连", UI_SECONDARY);
+        ui_button(bottom, pair_button, "L 设备配对", UI_SECONDARY);
+        ui_button(bottom, simulator_button, "Y 本机模拟器", UI_SECONDARY);
         if (*setup->notice) {
             line(top, 16, 150, setup->notice, UI_WARNING);
             line(top, 16, 170, line_end(setup->notice, 368), UI_WARNING);
@@ -315,7 +351,7 @@ void setup_draw(Screen top, Screen bottom, const Setup *setup)
     }
     const char *labels[] = {"电脑地址", "端口", "配对码"};
     const char *values[] = {setup->address, setup->port, setup->code};
-    for (unsigned i = 0; i < 3; i++) {
+    for (unsigned i = 0; i < (setup->pairing ? 3u : 2u); i++) {
         int y = 52 + 38 * i;
         ui_card(top, (Rect){16, y, 368, 33}, UI_PANEL, setup->field == i ? UI_ACCENT : 0);
         line(top, 26, y + 8, labels[i], UI_ACCENT);
@@ -329,16 +365,23 @@ void setup_draw(Screen top, Screen bottom, const Setup *setup)
         line(bottom, 12, 80, "正在建立加密连接…", UI_ACCENT);
         return;
     }
-    line(bottom, 8, 12, "直连可留空配对码", UI_ACCENT);
+    line(bottom, 8, 12, setup->pairing ? "输入电脑显示的 20 位配对码" : "填电脑地址和端口即可直连", UI_ACCENT);
+    touchPosition touch = {0};
+    if (held & KEY_TOUCH) hidTouchRead(&touch);
     for (unsigned row = 0; row < 4; row++) {
-        for (unsigned column = 0; column < 10; column++) {
-            char key[] = {keys[row][column], '\0'};
-            button(bottom, 5 + 31 * column, GRID_TOP + GRID_HEIGHT * row, 29, 28, key,
-                   row == setup->row && column == setup->column ? UI_PRIMARY : UI_SECONDARY);
+        const char *row_keys = key_row(setup, row);
+        for (unsigned column = 0; row_keys[column]; column++) {
+            char key[] = {row_keys[column], '\0'};
+            Rect rect = key_rect(setup, row, column);
+            bool current = row == setup->row && column == setup->column;
+            bool down = current && ((held & KEY_A) || ((held & KEY_TOUCH) && ui_hit(rect, touch)));
+            ui_card(bottom, rect, down ? UI_FOCUS : UI_PANEL,
+                    current && setup->keypad_focus ? UI_ACCENT : 0);
+            text(bottom, rect.x + (rect.w - 8) / 2, rect.y + (rect.h - 16) / 2, key, key + 1, UI_TEXT);
         }
     }
     button(bottom, 5, 180, 96, 34, "Y 删除", UI_SECONDARY);
-    button(bottom, 105, 180, 104, 34, "SELECT 换项", UI_SECONDARY);
+    button(bottom, 105, 180, 104, 34, "换输入项", UI_SECONDARY);
     button(bottom, 215, 180, 100, 34, "START 连接", UI_PRIMARY);
-    line(bottom, 8, 220, "A 输入   B 返回", UI_TEXT);
+    line(bottom, 8, 220, "A 输入  SELECT 换项  B 返回", UI_TEXT);
 }

@@ -344,6 +344,69 @@ static bool check_discovered(BridgeRequest *request)
     return !*request->error && !strcmp(request->response, "3ds-codex-bridge/1\n");
 }
 
+typedef struct {
+    struct sockaddr_in address;
+    bool direct;
+} DiscoveryPeer;
+
+static void send_probe(int fd, struct sockaddr_in destination, u32 address)
+{
+    const char query[] = "3DS-CODEX-DISCOVER-1";
+    destination.sin_addr.s_addr = address;
+    sendto(fd, query, sizeof(query) - 1, 0, (struct sockaddr *)&destination, sizeof(destination));
+}
+
+static unsigned receive_peers(int fd, DiscoveryPeer *peers, unsigned count, unsigned capacity,
+                              unsigned timeout, bool has_credentials)
+{
+    const char marker[] = "3DS-CODEX-BRIDGE-1 ";
+    u64 deadline = osGetTime() + timeout;
+    while (count < capacity && wait_for_socket(fd, POLLIN, deadline) == 0) {
+        char reply[64];
+        struct sockaddr_in peer = {0};
+        socklen_t size = sizeof(peer);
+        ssize_t length = recvfrom(fd, reply, sizeof(reply) - 1, 0, (struct sockaddr *)&peer, &size);
+        if (length <= (ssize_t)(sizeof(marker) - 1)) continue;
+        reply[length] = '\0';
+        if (peer.sin_port != htons(DISCOVERY_PORT) || strncmp(reply, marker, sizeof(marker) - 1)) continue;
+        char *end;
+        unsigned long port = strtoul(reply + sizeof(marker) - 1, &end, 10);
+        bool direct = strcmp(end, " direct") == 0;
+        if ((!direct && (*end || !has_credentials)) || !port || port > 65535) continue;
+        peer.sin_port = htons((u16)port);
+        bool duplicate = false;
+        for (unsigned i = 0; i < count; i++) {
+            if (peers[i].address.sin_addr.s_addr == peer.sin_addr.s_addr && peers[i].address.sin_port == peer.sin_port) {
+                duplicate = true;
+            }
+        }
+        if (!duplicate) peers[count++] = (DiscoveryPeer){peer, direct};
+    }
+    return count;
+}
+
+static unsigned scan_subnet(int fd, struct sockaddr_in destination, struct in_addr ip, struct in_addr mask,
+                            DiscoveryPeer *peers, unsigned capacity, bool has_credentials)
+{
+    u32 local = ntohl(ip.s_addr);
+    if (!local) local = ntohl(gethostid());
+    bool private_ip = (local >> 24) == 10 || (local >> 20) == 0xac1 || (local >> 16) == 0xc0a8;
+    if (!private_ip) return 0;
+
+    u32 subnet_mask = ntohl(mask.s_addr) | 0xffffff00u;
+    u32 first = (local & subnet_mask) + 1;
+    u32 end = local | ~subnet_mask;
+    unsigned count = 0;
+    // Broadcast can be dropped even after sendto succeeds. Probe only the local subnet.
+    for (u32 start = first; start < end && !count; start += 16) {
+        for (u32 peer = start; peer < start + 16 && peer < end; peer++) {
+            if (peer != local) send_probe(fd, destination, htonl(peer));
+        }
+        count = receive_peers(fd, peers, count, capacity, 95, has_credentials);
+    }
+    return count ? count : receive_peers(fd, peers, 0, capacity, 400, has_credentials);
+}
+
 void discover_bridge(void *context)
 {
     BridgeRequest *request = context;
@@ -352,74 +415,25 @@ void discover_bridge(void *context)
     strcpy(request->path, "/health");
     request->message[0] = '\0';
 
-    struct {
-        struct sockaddr_in address;
-        bool direct;
-    } peers[6];
+    DiscoveryPeer peers[6];
     unsigned count = 0;
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd >= 0) {
-        const char query[] = "3DS-CODEX-DISCOVER-1";
-        const char marker[] = "3DS-CODEX-BRIDGE-1 ";
-        struct sockaddr_in destination = {.sin_family = AF_INET, .sin_port = htons(DISCOVERY_PORT),
-                                         .sin_addr.s_addr = INADDR_BROADCAST};
+        struct sockaddr_in destination = {.sin_family = AF_INET, .sin_port = htons(DISCOVERY_PORT)};
         int enable = 1;
         setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &enable, sizeof(enable));
         fcntl(fd, F_SETFL, O_NONBLOCK);
+
         struct in_addr ip = {0}, mask = {0}, broadcast = {0};
-        bool have_ip = SOCU_GetIPInfo(&ip, &mask, &broadcast) == 0;
-        bool sent_broadcast = false;
-        if (have_ip && broadcast.s_addr) {
-            destination.sin_addr = broadcast;
-            sent_broadcast = sendto(fd, query, sizeof(query) - 1, 0,
-                                    (struct sockaddr *)&destination, sizeof(destination)) > 0;
-        }
-        destination.sin_addr.s_addr = INADDR_BROADCAST;
-        if (sendto(fd, query, sizeof(query) - 1, 0, (struct sockaddr *)&destination, sizeof(destination)) > 0) {
-            sent_broadcast = true;
-        }
-        destination.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        sendto(fd, query, sizeof(query) - 1, 0, (struct sockaddr *)&destination, sizeof(destination));
-
-        if (!sent_broadcast && have_ip) {
-            u32 local = ntohl(ip.s_addr);
-            bool private_ip = (local >> 24) == 10 || (local >> 20) == 0xac1 || (local >> 16) == 0xc0a8;
-            if (private_ip) {
-                u32 subnet_mask = ntohl(mask.s_addr) | 0xffffff00u;
-                u32 start = (local & subnet_mask) + 1;
-                u32 end = (local | ~subnet_mask);
-                for (u32 peer = start; peer < end; peer++) {
-                    if (peer == local) continue;
-                    destination.sin_addr.s_addr = htonl(peer);
-                    sendto(fd, query, sizeof(query) - 1, 0, (struct sockaddr *)&destination, sizeof(destination));
-                }
-            }
-        }
-
-        u64 deadline = osGetTime() + 950;
-        while (count < sizeof(peers) / sizeof(peers[0]) && wait_for_socket(fd, POLLIN, deadline) == 0) {
-            char reply[64];
-            struct sockaddr_in peer = {0};
-            socklen_t size = sizeof(peer);
-            ssize_t length = recvfrom(fd, reply, sizeof(reply) - 1, 0, (struct sockaddr *)&peer, &size);
-            if (length <= (ssize_t)(sizeof(marker) - 1)) continue;
-            reply[length] = '\0';
-            if (peer.sin_port != htons(DISCOVERY_PORT) || strncmp(reply, marker, sizeof(marker) - 1)) continue;
-            char *end;
-            unsigned long port = strtoul(reply + sizeof(marker) - 1, &end, 10);
-            bool direct = strcmp(end, " direct") == 0;
-            if ((!direct && *end) || !port || port > 65535) continue;
-            peer.sin_port = htons((u16)port);
-            bool duplicate = false;
-            for (unsigned i = 0; i < count; i++) {
-                if (peers[i].address.sin_addr.s_addr == peer.sin_addr.s_addr && peers[i].address.sin_port == peer.sin_port) {
-                    duplicate = true;
-                }
-            }
-            if (!duplicate) {
-                peers[count].address = peer;
-                peers[count++].direct = direct;
-            }
+        SOCU_GetIPInfo(&ip, &mask, &broadcast);
+        if (broadcast.s_addr) send_probe(fd, destination, broadcast.s_addr);
+        send_probe(fd, destination, INADDR_BROADCAST);
+        send_probe(fd, destination, htonl(INADDR_LOOPBACK));
+        if (*saved.address) send_probe(fd, destination, inet_addr(saved.address));
+        count = receive_peers(fd, peers, count, sizeof(peers) / sizeof(peers[0]), 650, saved.key_length != 0);
+        if (!count) {
+            count = scan_subnet(fd, destination, ip, mask, peers, sizeof(peers) / sizeof(peers[0]),
+                                saved.key_length != 0);
         }
         close(fd);
     }

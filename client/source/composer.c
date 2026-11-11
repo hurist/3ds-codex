@@ -215,6 +215,7 @@ ComposeAction composer_input(Composer *draft, u32 pressed, u32 repeat, const cha
     touchPosition touch = {0};
     if (pressed & KEY_TOUCH) {
         hidTouchRead(&touch);
+        draft->keypad_focus = false;
     }
     if (draft->edit_caret) {
         if (repeat & KEY_LEFT) {
@@ -291,6 +292,7 @@ ComposeAction composer_input(Composer *draft, u32 pressed, u32 repeat, const cha
         space_or_commit(draft);
     }
     unsigned rows = keyboard_rows(draft);
+    if (repeat & (KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT)) draft->keypad_focus = true;
     if (repeat & KEY_UP) {
         draft->row = (draft->row + rows - 1) % rows;
     } else if (repeat & KEY_DOWN) {
@@ -372,14 +374,18 @@ static void centered_label(Screen screen, Rect rect, const char *label, u32 colo
     text(screen, rect.x + (rect.w - width) / 2, rect.y + (rect.h - 16) / 2, label, end, color);
 }
 
-static void draw_keyboard(Screen bottom, const Composer *draft)
+static void draw_keyboard(Screen bottom, const Composer *draft, u32 held)
 {
+    touchPosition touch = {0};
+    if (held & KEY_TOUCH) hidTouchRead(&touch);
     for (unsigned row = 0; row < keyboard_rows(draft); row++) {
         for (unsigned column = 0; column < keyboard_columns(draft, row); column++) {
             KeyboardKey key = keyboard_key(draft, row, column);
-            bool focused = draft->row == row && draft->column == column;
+            bool current = draft->row == row && draft->column == column;
             bool secondary = key.action == KEY_ERASE || key.action == KEY_SHIFT;
-            ui_card(bottom, key.rect, focused ? UI_FOCUS : UI_PANEL, focused ? UI_ACCENT : 0);
+            bool down = current && ((held & KEY_A) || ((held & KEY_TOUCH) && ui_hit(key.rect, touch)));
+            ui_card(bottom, key.rect, down ? UI_FOCUS : UI_PANEL,
+                    current && draft->keypad_focus ? UI_ACCENT : 0);
             centered_label(bottom, key.rect, key.label, secondary ? UI_ACCENT : UI_TEXT);
         }
     }
@@ -416,7 +422,7 @@ static void draw_candidates(Screen bottom, const Composer *draft, const PinyinPa
 }
 
 void composer_draw(const Composer *draft, Screen top, Screen bottom, const char *title,
-                   bool follow_up, bool can_paste, bool answering)
+                   bool follow_up, bool can_paste, bool answering, u32 held)
 {
     draw_draft(draft, top, title, follow_up, answering);
     PinyinPage page = pinyin_candidates(draft->digits, draft->candidate_page);
@@ -458,7 +464,7 @@ void composer_draw(const Composer *draft, Screen top, Screen bottom, const char 
         ui_button(bottom, toolbar_middle, "光标", UI_SECONDARY);
         ui_button(bottom, toolbar_right, "语音听写", UI_SECONDARY);
     }
-    draw_keyboard(bottom, draft);
+    draw_keyboard(bottom, draft, held);
     ui_button(bottom, symbols_button, draft->symbols ? "返回" : "符号", UI_SECONDARY);
     ui_button(bottom, language_button, draft->latin ? "英" : "中", UI_SECONDARY);
     if (draft->latin && !draft->symbols) {

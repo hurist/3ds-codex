@@ -15,6 +15,8 @@ typedef struct {
     unsigned field;
     unsigned row;
     unsigned column;
+    bool pairing;
+    bool keypad_focus;
     char notice[128];
 } Setup;
 
@@ -22,6 +24,6 @@ void setup_load(Setup *setup);
 SetupAction setup_input(Setup *setup, u32 pressed, u32 repeat, BridgeEndpoint *endpoint);
 bool setup_discovered(Setup *setup, const BridgeRequest *request, BridgeEndpoint *endpoint);
 bool setup_receive(Setup *setup, const BridgeRequest *request, BridgeEndpoint *endpoint);
-void setup_draw(Screen top, Screen bottom, const Setup *setup);
+void setup_draw(Screen top, Screen bottom, const Setup *setup, u32 held);
 
 #endif
