@@ -32,7 +32,9 @@ static const Rect third_left = {16, 152, 140, 37};
 static const Rect third_right = {164, 152, 140, 37};
 static const Rect open_button = {16, 100, 288, 37};
 static const Rect approval_banner = {177, 7, 127, 29};
-static const Rect picture_button = {172, 193, 132, 27};
+static const Rect compact_older = {16, 48, 90, 37};
+static const Rect compact_latest = {115, 48, 90, 37};
+static const Rect picture_button = {214, 48, 90, 37};
 
 typedef enum {
     PROJECTS,
@@ -449,8 +451,10 @@ static void render(Screen top, Screen bottom, View view, bool loaded, bool loadi
         } else {
             if (pending) ui_button(bottom, approval_banner, "Y 查看审批", UI_CAUTION);
             if (needs_input) ui_button(bottom, approval_banner, "Y 查看问题", UI_CAUTION);
-            ui_button(bottom, first_left, "较早消息", has_next ? UI_SECONDARY : UI_DISABLED);
-            ui_button(bottom, first_right, "跳到最新", UI_SECONDARY);
+            ui_button(bottom, pictures.count ? compact_older : first_left, "较早消息",
+                      has_next ? UI_SECONDARY : UI_DISABLED);
+            ui_button(bottom, pictures.count ? compact_latest : first_right, "跳到最新", UI_SECONDARY);
+            if (pictures.count) ui_button(bottom, picture_button, "查看图片", UI_SECONDARY);
             ui_button(bottom, second_left, "A 选择文字", history_count ? UI_SECONDARY : UI_DISABLED);
             ui_button(bottom, second_right, "复制整条", message_count ? UI_SECONDARY : UI_DISABLED);
             if (can_compose(retry_action)) {
@@ -461,8 +465,7 @@ static void render(Screen top, Screen bottom, View view, bool loaded, bool loadi
                 ui_button(bottom, third_right, "停止本轮", UI_SECONDARY);
             }
             const char *status = action_result && !loading && !*error ? action_result : status_label();
-            ui_label(bottom, 16, 200, pictures.count ? 148 : 288, status, pending ? UI_WARNING : UI_ACCENT);
-            if (pictures.count) ui_button(bottom, picture_button, "查看图片", UI_SECONDARY);
+            ui_label(bottom, 16, 200, 288, status, pending ? UI_WARNING : UI_ACCENT);
         }
     } else if (loaded) {
         ui_button(bottom, first_left, "上一页", view.page ? UI_SECONDARY : UI_DISABLED);
@@ -509,8 +512,8 @@ static u32 touch_action(View view, touchPosition touch, bool retry_action, bool 
         if ((!strcmp(turn_state, "approval") || !strcmp(turn_state, "input")) &&
             ui_hit(approval_banner, touch)) return KEY_Y;
         if (!strcmp(turn_state, "input") && can_control_turn() && ui_hit(third_right, touch)) return KEY_SELECT;
-        if (ui_hit(first_left, touch)) return has_next ? KEY_R : 0;
-        if (ui_hit(first_right, touch)) return KEY_ZR;
+        if (ui_hit(pictures.count ? compact_older : first_left, touch)) return has_next ? KEY_R : 0;
+        if (ui_hit(pictures.count ? compact_latest : first_right, touch)) return KEY_ZR;
         if (ui_hit(second_left, touch)) return history_count ? KEY_A : 0;
         if (ui_hit(second_right, touch)) {
             *copy_message = message_count != 0;
